@@ -16,28 +16,51 @@
     {
         public static async Task Main()
         {
+            var siteName = "funcchgeuer123";
+
+            Dictionary<string, (string TenantID, string SubcriptionID, string ResourceGroupName)> environment = new()
+            {
+                { "spqpzpz3chwpnb6", ("geuer-pollmann.de", "706df49f-998b-40ec-aed3-7f0ce9c67759", "meteredbilling-infra-20230112") },
+                { "checkpoint1", ("chgeuerfte.aad.geuer-pollmann.de", "724467b5-bee4-484b-bf13-d6a5505d2b51", "checkpoint") },
+                { "funcchgeuer123", ("chgeuerfte.aad.geuer-pollmann.de", "724467b5-bee4-484b-bf13-d6a5505d2b51", "checkpoint") },
+            };
+
+            // https://learn.microsoft.com/en-us/dotnet/api/overview/azure/identity-readme?view=azure-dotnet
             //DefaultAzureCredential cred = new();
             //AzureCliCredential cred = new();
+
+            var (clientId, clientSecretFile) = ("7b8e9825-af72-4c2a-a2df-94929355b3b8", @"C:\Users\chgeuer\.secrets\principal-for-unencrypted-function-scanning.txt");
             ClientSecretCredential cred = new(
-                tenantId: "5f9e748d-300b-48f1-85f5-3aa96d6260cb",
-                clientId: "7b8e9825-af72-4c2a-a2df-94929355b3b8",
-                clientSecret: await File.ReadAllTextAsync(path: @"C:\Users\chgeuer\.secrets\principal-for-unencrypted-function-scanning.txt"));
+                tenantId: environment[siteName].TenantID,
+                clientId: clientId,
+                clientSecret: await File.ReadAllTextAsync(path: clientSecretFile));
 
             var accessToken = await cred.GetTokenAsync(new(scopes: new[] { "https://management.azure.com/.default" }));
 
             var scmCredential = await FetchSCMCredentialFromAzureResourceManager(
                 bearerToken: accessToken.Token,
-                subscriptionId: "706df49f-998b-40ec-aed3-7f0ce9c67759",
-                resourceGroupName: "meteredbilling-infra-20230112",
-                siteName: "spqpzpz3chwpnb6");
+                subscriptionId: environment[siteName].SubcriptionID,
+                resourceGroupName: environment[siteName].ResourceGroupName,
+                siteName: siteName);
 
+            //scmCredential = scmCredential with {
+            //    Properties = scmCredential.Properties with {
+            //        PublishingUserName = "00000000-0000-0000-0000-000000000000",
+            //        PublishingPassword = accessToken.Token
+            //    }
+            //};
+
+            var vfsEndpoint = $"https://{scmCredential.Name}.scm.azurewebsites.net/api/vfs/";
+
+            await Console.Error.WriteLineAsync($"Using user \"{scmCredential.Properties.PublishingUserName}\" and password \"{scmCredential.Properties.PublishingPassword}\" to access {vfsEndpoint}");
             var zipFilename = new FileInfo($"{scmCredential.Name}.zip").FullName;
             using var outputStream = File.OpenWrite(zipFilename);
             using ZipArchive zipArchive = new(outputStream, ZipArchiveMode.Create);
 
             await scmCredential.CreateHttpClient().RecurseAsync(
-                requestUri: $"https://{scmCredential.Name}.scm.azurewebsites.net/api/vfs/",
-                policy: FollowPolicy.IgnoreShortcuts, task: zipArchive.CreateEntry);
+                requestUri: vfsEndpoint,
+                policy: FollowPolicy.IgnoreShortcuts,
+                task: zipArchive.CreateEntry);
 
             await Console.Out.WriteLineAsync($"Created archive {zipFilename}");
         }
@@ -68,6 +91,7 @@
             HttpClient httpClient = new() { BaseAddress = new("https://management.azure.com/") };
             httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {bearerToken}");
 
+            // Requires action 'Microsoft.Web/sites/config/list/action' (Other : List Web App Security Sensitive Settings: List Web App's security sensitive settings, such as publishing credentials, app settings and connection strings)
             var listPublishingPath = string.IsNullOrEmpty(slotName)
                 ? $"/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Web/sites/{siteName}/config/publishingcredentials/list?api-version=2022-09-01"
                 : $"/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Web/sites/{siteName}/slots/{slotName}/config/publishingcredentials/list?api-version=2022-09-01";
@@ -76,10 +100,10 @@
             return await scmCredentialResponse.Content.ReadFromJsonAsync<PublishingCredential>();
         }
 
-        public static HttpClient CreateHttpClient(this PublishingCredential scmCredential)
+        public static HttpClient CreateHttpClient(this PublishingCredential cred)
         {
             HttpClient downloaderClient = new();
-            var up = $"{scmCredential!.Properties.PublishingUserName}:{scmCredential.Properties.PublishingPassword}";
+            var up = $"{cred.Properties.PublishingUserName}:{cred.Properties.PublishingPassword}";
             var basicUsernamePassword = Convert.ToBase64String(Encoding.UTF8.GetBytes(up), Base64FormattingOptions.None);
             downloaderClient.DefaultRequestHeaders.Add("Authorization", $"Basic {basicUsernamePassword}");
             return downloaderClient;
