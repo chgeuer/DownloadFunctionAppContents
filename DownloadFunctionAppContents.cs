@@ -120,10 +120,8 @@
         internal static async Task<PublishingCredential> FetchSCMCredential(this HttpClient armHttpClient, SiteInfo info)
         {
             // Requires action 'Microsoft.Web/sites/config/list/action' (Other : List Web App Security Sensitive Settings: List Web App's security sensitive settings, such as publishing credentials, app settings and connection strings)
-            var listPublishingPath = string.IsNullOrEmpty(info.SlotName)
-                ? $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/config/publishingcredentials/list?api-version=2022-09-01"
-                : $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/slots/{info.SlotName}/config/publishingcredentials/list?api-version=2022-09-01";
-            var scmCredentialResponse = await armHttpClient.PostAsync(requestUri: listPublishingPath, content: null);
+            var requestUri = info.CreateURL("config/publishingcredentials/list?api-version=2022-09-01");
+            var scmCredentialResponse = await armHttpClient.PostAsync(requestUri, content: null);
 
             scmCredentialResponse.EnsureSuccessStatusCode();
             return await scmCredentialResponse.Content.ReadFromJsonAsync<PublishingCredential>();
@@ -131,13 +129,17 @@
 
         internal static async Task<bool> GetSCMBasicAuthEnabled(this HttpClient armHttpClient, SiteInfo info)
         {
-            var requestUri = $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/basicPublishingCredentialsPolicies/scm?api-version=2022-09-01";
+            var requestUri = info.CreateURL("basicPublishingCredentialsPolicies/scm?api-version=2022-09-01");
 
             // Requires action 'Microsoft.Web/sites/basicPublishingCredentialsPolicies/read'
             var policyJsonStr = await armHttpClient.GetStringAsync(requestUri);
             JsonNode json = JsonNode.Parse(policyJsonStr)!;
             return (bool)json["properties"]["allow"];
         }
+
+        internal static string CreateURL(this SiteInfo info, string suffix) => string.IsNullOrEmpty(info.SlotName)
+            ? $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/{suffix}"
+            : $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/slots/{info.SlotName}/{suffix}";
 
         internal static async Task SetSCMSetBasicAuth(this HttpClient armHttpClient, SiteInfo info, bool allow)
         {
@@ -146,9 +148,9 @@
             //    --namespace Microsoft.Web --parent "sites/${siteName}" \
             //    --resource-type basicPublishingCredentialsPolicies --name scm --set properties.allow=true
 
-            var requestUri = $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/basicPublishingCredentialsPolicies/scm?api-version=2022-09-01";
+            var requestUri = info.CreateURL("basicPublishingCredentialsPolicies/scm?api-version=2022-09-01");
 
-            // Requires action 'Microsoft.Web/sites/basicPublishingCredentialsPolicies/read'
+            // Requires action 'Microsoft.Web/sites/basicPublishingCredentialsPolicies/scm/Read' and 'Microsoft.Web/sites/slots/basicPublishingCredentialsPolicies/scm/Read'
             var policyJsonStr = await armHttpClient.GetStringAsync(requestUri);
             JsonNode json = JsonNode.Parse(policyJsonStr)!;
             if (allow != (bool)json["properties"]["allow"])
@@ -174,7 +176,14 @@
 
         internal static async Task RecurseAsync(this HttpClient scmHttpClient, string requestUri, FollowPolicy policy, Func<HttpClient, VirtualFileSystemEntry, Task> task)
         {
-            var entries = await scmHttpClient.GetFromJsonAsync<IEnumerable<VirtualFileSystemEntry>>(requestUri);
+            var response = await scmHttpClient.GetAsync(requestUri);
+            if (response == null || response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                await Console.Error.WriteLineAsync($"Not found: {requestUri}");
+                return;
+            }
+
+            var entries = await response.Content.ReadFromJsonAsync<IEnumerable<VirtualFileSystemEntry>>();
             foreach (var entry in entries)
             {
                 await ((entry.Mime, policy) switch
