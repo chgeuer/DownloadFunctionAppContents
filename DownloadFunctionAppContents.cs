@@ -4,6 +4,7 @@
     using System.IO;
     using System.IO.Compression;
     using System.Net.Http.Json;
+    using System.Reflection.Metadata.Ecma335;
     using System.Text;
     using System.Text.Json.Nodes;
     using Azure.Core;
@@ -59,13 +60,6 @@
 
             var scmCredential = await armHttpClient.FetchSCMCredential(siteInfo);
 
-            //scmCredential = scmCredential with {
-            //    Properties = scmCredential.Properties with {
-            //        PublishingUserName = "00000000-0000-0000-0000-000000000000",
-            //        PublishingPassword = accessToken.Token
-            //    }
-            //};
-
             var vfsEndpoint = $"https://{siteInfo.SiteName}.scm.azurewebsites.net/api/vfs/";
 
             var zipFilename = new FileInfo($"{siteInfo.SiteName}.zip").FullName;
@@ -111,35 +105,52 @@
             }
         }
 
-        public static HttpClient CreateARMHttpClient(this AccessToken accessToken) {
-            HttpClient armHttpClient = new() { BaseAddress = new("https://management.azure.com/") };
-            armHttpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {accessToken.Token}");
-            return armHttpClient;
+        internal static string CreateURL(this SiteInfo info, string suffix)
+            => string.IsNullOrEmpty(info.SlotName)
+                ? $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/{suffix}"
+                : $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/slots/{info.SlotName}/{suffix}";
+
+        internal static HttpClient AddAccessTokenCredential(this HttpClient httpClient, AccessToken accessToken)
+        {
+            httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {accessToken.Token}");
+            return httpClient;
         }
+
+        internal static HttpClient CreateARMHttpClient(this AccessToken accessToken)
+            => new HttpClient() { BaseAddress = new("https://management.azure.com/") }.AddAccessTokenCredential(accessToken);
+
+        internal static HttpClient AddBasicAuthCredential(this HttpClient httpClient, string username, string password)
+        {
+            var upBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"), Base64FormattingOptions.None);
+            httpClient.DefaultRequestHeaders.Add("Authorization", $"Basic {upBase64}");
+            return httpClient;
+        }
+
+        internal static HttpClient AddAccessTokenAsBasicAuthCredential(this HttpClient httpClient, AccessToken accessToken)
+            => httpClient.AddBasicAuthCredential(username: "00000000-0000-0000-0000-000000000000", password: accessToken.Token);
+
+        internal static HttpClient CreateSCMHttpClient(this PublishingCredential cred)
+            => new HttpClient().AddBasicAuthCredential(
+                username: cred.Properties.PublishingUserName,
+                password: cred.Properties.PublishingPassword);
 
         internal static async Task<PublishingCredential> FetchSCMCredential(this HttpClient armHttpClient, SiteInfo info)
         {
             // Requires action 'Microsoft.Web/sites/config/list/action' (Other : List Web App Security Sensitive Settings: List Web App's security sensitive settings, such as publishing credentials, app settings and connection strings)
             var requestUri = info.CreateURL("config/publishingcredentials/list?api-version=2022-09-01");
             var scmCredentialResponse = await armHttpClient.PostAsync(requestUri, content: null);
-
             scmCredentialResponse.EnsureSuccessStatusCode();
             return await scmCredentialResponse.Content.ReadFromJsonAsync<PublishingCredential>();
         }
 
         internal static async Task<bool> GetSCMBasicAuthEnabled(this HttpClient armHttpClient, SiteInfo info)
         {
-            var requestUri = info.CreateURL("basicPublishingCredentialsPolicies/scm?api-version=2022-09-01");
-
             // Requires action 'Microsoft.Web/sites/basicPublishingCredentialsPolicies/read'
+            var requestUri = info.CreateURL("basicPublishingCredentialsPolicies/scm?api-version=2022-09-01");
             var policyJsonStr = await armHttpClient.GetStringAsync(requestUri);
             JsonNode json = JsonNode.Parse(policyJsonStr)!;
             return (bool)json["properties"]["allow"];
         }
-
-        internal static string CreateURL(this SiteInfo info, string suffix) => string.IsNullOrEmpty(info.SlotName)
-            ? $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/{suffix}"
-            : $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/slots/{info.SlotName}/{suffix}";
 
         internal static async Task SetSCMSetBasicAuth(this HttpClient armHttpClient, SiteInfo info, bool allow)
         {
@@ -163,15 +174,6 @@
                     encoding: Encoding.UTF8,
                     mediaType: "application/json"));
             }
-        }
-
-        internal static HttpClient CreateSCMHttpClient(this PublishingCredential cred)
-        {
-            HttpClient scmHttpClient = new();
-            var up = $"{cred.Properties.PublishingUserName}:{cred.Properties.PublishingPassword}";
-            var basicUsernamePassword = Convert.ToBase64String(Encoding.UTF8.GetBytes(up), Base64FormattingOptions.None);
-            scmHttpClient.DefaultRequestHeaders.Add("Authorization", $"Basic {basicUsernamePassword}");
-            return scmHttpClient;
         }
 
         internal static async Task RecurseAsync(this HttpClient scmHttpClient, string requestUri, FollowPolicy policy, Func<HttpClient, VirtualFileSystemEntry, Task> task)
