@@ -4,7 +4,6 @@
     using System.IO;
     using System.IO.Compression;
     using System.Net.Http.Json;
-    using System.Reflection.Metadata.Ecma335;
     using System.Text;
     using System.Text.Json.Nodes;
     using Azure.Core;
@@ -15,23 +14,21 @@
     public record VirtualFileSystemEntry(string Name, long Size, DateTimeOffset Mtime, DateTimeOffset Crtime, string Mime, string Href, string Path);
     internal record SiteInfo(string TenantID, string SubscriptionID, string ResourceGroupName, string SiteName, string SlotName);
     internal enum FollowPolicy { IgnoreShortcuts = 0, FollowShortcuts = 1 }
+    internal enum SCMAuthenticationMechanism { UseSCMApplicationScope = 0, UseAccessToken = 1}
 
     public static class DownloadFunctionAppContents
     {
         public static async Task Main()
         {
-            var siteName = "linuxdockerw";
+            var siteName = "chgeuer1";
+            var authMechanism = SCMAuthenticationMechanism.UseSCMApplicationScope;
 
             SiteInfo ISVSite(string ResourceGroupName, string SiteName) => new("geuer-pollmann.de", "706df49f-998b-40ec-aed3-7f0ce9c67759", ResourceGroupName, SiteName, SlotName: null);
             SiteInfo CustomerSite(string ResourceGroupName, string SiteName) => new("chgeuerfte.aad.geuer-pollmann.de", "724467b5-bee4-484b-bf13-d6a5505d2b51", ResourceGroupName, SiteName, SlotName: null);
             List<SiteInfo> siteInfos = new()
             {
                 ISVSite("meteredbilling-infra-20230112", "spqpzpz3chwpnb6"),
-                CustomerSite("checkpoint", "somefunctionwindows"),
-                CustomerSite("checkpoint", "linuxdockerw"),
-                CustomerSite("checkpoint", "somebiggerwindowsfunc"),
-                CustomerSite("checkpoint", "checkpoint1"),
-                CustomerSite("checkpoint", "funcchgeuer123"),
+                CustomerSite("checkpoint", "chgeuer1"),
             };
             SiteInfo siteInfo = siteInfos.Single(si => si.SiteName == siteName);
 
@@ -48,17 +45,18 @@
             var accessToken = await cred.GetTokenAsync(new(scopes: new[] { "https://management.azure.com/.default" }));
             HttpClient armHttpClient = accessToken.CreateARMHttpClient();
 
-            bool needToDisableBasicAuthAgain = false;
-            bool scmBasicAllowed = await armHttpClient.GetSCMBasicAuthEnabled(siteInfo);
-            if (!scmBasicAllowed)
+            bool needToDisableSCMBasicAuthAgain = false;
+            if (authMechanism == SCMAuthenticationMechanism.UseSCMApplicationScope)
             {
-                await armHttpClient.SetSCMSetBasicAuth(siteInfo, allow: true);
-                // Wait until the updated permission propagated to the SCM site.
-                await Task.Delay(TimeSpan.FromSeconds(2));
-                needToDisableBasicAuthAgain = true;
+                bool scmBasicAuthAllowed = await armHttpClient.GetSCMBasicAuthAllowed(siteInfo);
+                if (!scmBasicAuthAllowed)
+                {
+                    await armHttpClient.SetSCMSetBasicAuth(siteInfo, allow: true);
+                    // Wait until the updated permission propagated to the SCM site.
+                    await Task.Delay(TimeSpan.FromSeconds(2));
+                    needToDisableSCMBasicAuthAgain = true;
+                }
             }
-
-            var scmCredential = await armHttpClient.FetchSCMCredential(siteInfo);
 
             var vfsEndpoint = $"https://{siteInfo.SiteName}.scm.azurewebsites.net/api/vfs/";
 
@@ -68,7 +66,14 @@
 
             try
             {
-                await scmCredential.CreateSCMHttpClient().RecurseAsync(
+                HttpClient scmClient = authMechanism switch
+                {
+                    SCMAuthenticationMechanism.UseSCMApplicationScope => (await armHttpClient.FetchSCMCredential(siteInfo)).CreateSCMHttpClient(),
+                    SCMAuthenticationMechanism.UseAccessToken => accessToken.CreateSCMHttpClient(),
+                    _ => throw new NotSupportedException(),
+                };
+
+                await scmClient.RecurseAsync(
                     requestUri: vfsEndpoint,
                     policy: FollowPolicy.IgnoreShortcuts,
                     task: zipArchive.CreateEntry);
@@ -77,7 +82,7 @@
             }
             finally
             {
-                if (needToDisableBasicAuthAgain)
+                if (needToDisableSCMBasicAuthAgain)
                 {
                     await armHttpClient.SetSCMSetBasicAuth(siteInfo, allow: false);
                 }
@@ -116,18 +121,20 @@
             return httpClient;
         }
 
-        internal static HttpClient CreateARMHttpClient(this AccessToken accessToken)
-            => new HttpClient() { BaseAddress = new("https://management.azure.com/") }.AddAccessTokenCredential(accessToken);
-
         internal static HttpClient AddBasicAuthCredential(this HttpClient httpClient, string username, string password)
         {
-            var upBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"), Base64FormattingOptions.None);
-            httpClient.DefaultRequestHeaders.Add("Authorization", $"Basic {upBase64}");
+            httpClient.DefaultRequestHeaders.Add("Authorization", $"Basic {Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"), Base64FormattingOptions.None)}");
             return httpClient;
         }
 
         internal static HttpClient AddAccessTokenAsBasicAuthCredential(this HttpClient httpClient, AccessToken accessToken)
             => httpClient.AddBasicAuthCredential(username: "00000000-0000-0000-0000-000000000000", password: accessToken.Token);
+
+        internal static HttpClient CreateARMHttpClient(this AccessToken accessToken)
+            => new HttpClient() { BaseAddress = new("https://management.azure.com/") }.AddAccessTokenCredential(accessToken);
+
+        internal static HttpClient CreateSCMHttpClient(this AccessToken accessToken)
+            => new HttpClient().AddAccessTokenAsBasicAuthCredential(accessToken);
 
         internal static HttpClient CreateSCMHttpClient(this PublishingCredential cred)
             => new HttpClient().AddBasicAuthCredential(
@@ -143,7 +150,7 @@
             return await scmCredentialResponse.Content.ReadFromJsonAsync<PublishingCredential>();
         }
 
-        internal static async Task<bool> GetSCMBasicAuthEnabled(this HttpClient armHttpClient, SiteInfo info)
+        internal static async Task<bool> GetSCMBasicAuthAllowed(this HttpClient armHttpClient, SiteInfo info)
         {
             // Requires action 'Microsoft.Web/sites/basicPublishingCredentialsPolicies/read'
             var requestUri = info.CreateURL("basicPublishingCredentialsPolicies/scm?api-version=2022-09-01");
@@ -184,6 +191,7 @@
                 await Console.Error.WriteLineAsync($"Not found: {requestUri}");
                 return;
             }
+            response.EnsureSuccessStatusCode();
 
             var entries = await response.Content.ReadFromJsonAsync<IEnumerable<VirtualFileSystemEntry>>();
             foreach (var entry in entries)
