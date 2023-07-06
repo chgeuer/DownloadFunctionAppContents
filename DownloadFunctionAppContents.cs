@@ -20,11 +20,12 @@
     {
         public static async Task Main()
         {
-            var siteName = "downloadcontentdemo";
+            string siteName = "downloadcontentdemo";
             var authMechanism = SCMAuthenticationMechanism.UseSCMApplicationScope;
 
-            SiteInfo ISVSite(string ResourceGroupName, string SiteName) => new("geuer-pollmann.de", "706df49f-998b-40ec-aed3-7f0ce9c67759", ResourceGroupName, SiteName, SlotName: null);
-            SiteInfo CustomerSite(string ResourceGroupName, string SiteName) => new("chgeuerfte.aad.geuer-pollmann.de", "724467b5-bee4-484b-bf13-d6a5505d2b51", ResourceGroupName, SiteName, SlotName: null);
+            SiteInfo ISVSite(string resourceGroupName, string siteName) => new(TenantID: "geuer-pollmann.de", SubscriptionID: "706df49f-998b-40ec-aed3-7f0ce9c67759", ResourceGroupName: resourceGroupName, SiteName: siteName, SlotName: null);
+            SiteInfo CustomerSite(string resourceGroupName, string siteName) => new(TenantID: "chgeuerfte.aad.geuer-pollmann.de", SubscriptionID: "724467b5-bee4-484b-bf13-d6a5505d2b51", ResourceGroupName: resourceGroupName, SiteName: siteName, SlotName: null);
+
             List<SiteInfo> siteInfos = new()
             {
                 ISVSite("meteredbilling-infra-20230112", "spqpzpz3chwpnb6"),
@@ -42,7 +43,7 @@
                 clientId: clientId,
                 clientSecret: await File.ReadAllTextAsync(path: clientSecretFile));
 
-            var accessToken = await cred.GetTokenAsync(new(scopes: new[] { "https://management.azure.com/.default" }));
+            AccessToken accessToken = await cred.GetTokenAsync(new(scopes: new[] { "https://management.azure.com/.default" }));
             HttpClient armHttpClient = accessToken.CreateARMHttpClient();
 
             bool needToDisableSCMBasicAuthAgain = false;
@@ -58,10 +59,10 @@
                 }
             }
 
-            var vfsEndpoint = $"https://{siteInfo.SiteName}.scm.azurewebsites.net/api/vfs/";
+            string vfsEndpoint = $"https://{siteInfo.SiteName}.scm.azurewebsites.net/api/vfs/";
 
-            var zipFilename = new FileInfo($"{siteInfo.SiteName}.zip").FullName;
-            using var outputStream = File.OpenWrite(zipFilename);
+            string zipFilename = new FileInfo($"{siteInfo.SiteName}.zip").FullName;
+            using Stream outputStream = File.OpenWrite(zipFilename);
             using ZipArchive zipArchive = new(outputStream, ZipArchiveMode.Create);
 
             try
@@ -100,8 +101,8 @@
                     compressionLevel: CompressionLevel.Optimal);
                 zipArchiveEntry.LastWriteTime = vfsEntry.Crtime;
 
-                using var zipArchiveEntryStream = zipArchiveEntry.Open();
-                var downloadStream = await client.GetStreamAsync(requestUri: vfsEntry.Href);
+                using Stream zipArchiveEntryStream = zipArchiveEntry.Open();
+                using Stream downloadStream = await client.GetStreamAsync(requestUri: vfsEntry.Href);
                 await downloadStream.CopyToAsync(zipArchiveEntryStream);
             }
             catch (Exception ex)
@@ -143,9 +144,10 @@
 
         internal static async Task<PublishingCredential> FetchSCMCredential(this HttpClient armHttpClient, SiteInfo info)
         {
-            // Requires action 'Microsoft.Web/sites/config/list/action' (Other : List Web App Security Sensitive Settings: List Web App's security sensitive settings, such as publishing credentials, app settings and connection strings)
-            var requestUri = info.CreateURL("config/publishingcredentials/list?api-version=2022-09-01");
-            var scmCredentialResponse = await armHttpClient.PostAsync(requestUri, content: null);
+            // Requires action 'Microsoft.Web/sites/config/list/action'
+            // (Other : List Web App Security Sensitive Settings: List Web App's security sensitive settings, such as publishing credentials, app settings and connection strings)
+            string requestUri = info.CreateURL("config/publishingcredentials/list?api-version=2022-09-01");
+            HttpResponseMessage scmCredentialResponse = await armHttpClient.PostAsync(requestUri, content: null);
             scmCredentialResponse.EnsureSuccessStatusCode();
             return await scmCredentialResponse.Content.ReadFromJsonAsync<PublishingCredential>();
         }
@@ -153,8 +155,8 @@
         internal static async Task<bool> GetSCMBasicAuthAllowed(this HttpClient armHttpClient, SiteInfo info)
         {
             // Requires action 'Microsoft.Web/sites/basicPublishingCredentialsPolicies/read'
-            var requestUri = info.CreateURL("basicPublishingCredentialsPolicies/scm?api-version=2022-09-01");
-            var policyJsonStr = await armHttpClient.GetStringAsync(requestUri);
+            string requestUri = info.CreateURL("basicPublishingCredentialsPolicies/scm?api-version=2022-09-01");
+            string policyJsonStr = await armHttpClient.GetStringAsync(requestUri);
             JsonNode json = JsonNode.Parse(policyJsonStr)!;
             return (bool)json["properties"]["allow"];
         }
@@ -185,7 +187,7 @@
 
         internal static async Task RecurseAsync(this HttpClient scmHttpClient, string requestUri, FollowPolicy policy, Func<HttpClient, VirtualFileSystemEntry, Task> task)
         {
-            var response = await scmHttpClient.GetAsync(requestUri);
+            HttpResponseMessage response = await scmHttpClient.GetAsync(requestUri);
             if (response == null || response.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
                 await Console.Error.WriteLineAsync($"Not found: {requestUri}");
