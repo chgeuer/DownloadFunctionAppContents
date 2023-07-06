@@ -60,7 +60,7 @@ This approach works across AAD tenants. In this sample, you can see a custom AAD
 
 ```json
 {
-  "Name": "Web Site Scanning Role",
+  "Name": "ISV Web Site Scanning Role",
   "Description": "Allows download of Web App credentials and enabling and disabling basic auth for the SCM site.",
   "AssignableScopes": [ "/subscriptions/${subscriptionId}" ],
   "Actions": [ 
@@ -74,3 +74,17 @@ This approach works across AAD tenants. In this sample, you can see a custom AAD
 ```
 
 Installing this role in a customer tenant, and authorizing the ISV's multi-tenant app to have that permission at subscription or management group level, allows traversing / accessing function apps and web apps in other AAD tenants.
+
+In this screenshot, you can see the app service's "Access Control (IAM)" role assignments, and that the multi-tenant app from the ISV tenant has permissions from subscription scope trickling into the app service:
+
+![image-20230706132632346](img/role-assignments-app-service)
+
+## Demo time
+
+The included C# demo uses a service principal credential of a multi-tenant app to traverse 
+
+Running the C# utility against a new function app in a different tenant gives this:
+
+![image-20230706132212294](img/demo.png)
+
+![image-20230706132336660](img/zip-screenshot.png)

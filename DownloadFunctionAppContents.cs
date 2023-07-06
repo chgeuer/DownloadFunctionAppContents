@@ -20,7 +20,7 @@
     {
         public static async Task Main()
         {
-            var siteName = "chgeuer1";
+            var siteName = "downloadcontentdemo";
             var authMechanism = SCMAuthenticationMechanism.UseSCMApplicationScope;
 
             SiteInfo ISVSite(string ResourceGroupName, string SiteName) => new("geuer-pollmann.de", "706df49f-998b-40ec-aed3-7f0ce9c67759", ResourceGroupName, SiteName, SlotName: null);
@@ -28,7 +28,7 @@
             List<SiteInfo> siteInfos = new()
             {
                 ISVSite("meteredbilling-infra-20230112", "spqpzpz3chwpnb6"),
-                CustomerSite("checkpoint", "chgeuer1"),
+                CustomerSite("downloadfunctionappcontent", "downloadcontentdemo"),
             };
             SiteInfo siteInfo = siteInfos.Single(si => si.SiteName == siteName);
 
