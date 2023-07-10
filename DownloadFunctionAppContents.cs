@@ -14,14 +14,14 @@
     public record VirtualFileSystemEntry(string Name, long Size, DateTimeOffset Mtime, DateTimeOffset Crtime, string Mime, string Href, string Path);
     internal record SiteInfo(string TenantID, string SubscriptionID, string ResourceGroupName, string SiteName, string SlotName);
     internal enum FollowPolicy { IgnoreShortcuts = 0, FollowShortcuts = 1 }
-    internal enum SCMAuthenticationMechanism { UseSCMApplicationScope = 0, UseAccessToken = 1}
+    internal enum SCMAuthenticationMechanism { UseSCMApplicationScope = 0, UseAccessTokenBasic, UseAccessTokenBearer}
+    internal enum DownloadMethod { UseVFS = 0, UseZIP, UseFunctionZIP }
 
     public static class DownloadFunctionAppContents
     {
         public static async Task Main()
         {
-            string siteName = "downloadcontentdemo";
-            var authMechanism = SCMAuthenticationMechanism.UseSCMApplicationScope;
+            var (siteName, authMechanism, zipMechanism) = ("downloadcontentdemo", SCMAuthenticationMechanism.UseAccessTokenBearer, DownloadMethod.UseZIP);
 
             SiteInfo ISVSite(string resourceGroupName, string siteName) => new(TenantID: "geuer-pollmann.de", SubscriptionID: "706df49f-998b-40ec-aed3-7f0ce9c67759", ResourceGroupName: resourceGroupName, SiteName: siteName, SlotName: null);
             SiteInfo CustomerSite(string resourceGroupName, string siteName) => new(TenantID: "chgeuerfte.aad.geuer-pollmann.de", SubscriptionID: "724467b5-bee4-484b-bf13-d6a5505d2b51", ResourceGroupName: resourceGroupName, SiteName: siteName, SlotName: null);
@@ -59,27 +59,23 @@
                 }
             }
 
-            string vfsEndpoint = $"https://{siteInfo.SiteName}.scm.azurewebsites.net/api/vfs/";
-
-            string zipFilename = new FileInfo($"{siteInfo.SiteName}.zip").FullName;
-            using Stream outputStream = File.OpenWrite(zipFilename);
-            using ZipArchive zipArchive = new(outputStream, ZipArchiveMode.Create);
-
             try
             {
-                HttpClient scmClient = authMechanism switch
+                HttpClient scmHttpClient = authMechanism switch
                 {
                     SCMAuthenticationMechanism.UseSCMApplicationScope => (await armHttpClient.FetchSCMCredential(siteInfo)).CreateSCMHttpClient(),
-                    SCMAuthenticationMechanism.UseAccessToken => accessToken.CreateSCMHttpClient(),
+                    SCMAuthenticationMechanism.UseAccessTokenBasic => accessToken.CreateSCMBasicHttpClient(),
+                    SCMAuthenticationMechanism.UseAccessTokenBearer => accessToken.CreateSCMBearerHttpClient(),
                     _ => throw new NotSupportedException(),
                 };
 
-                await scmClient.RecurseAsync(
-                    requestUri: vfsEndpoint,
-                    policy: FollowPolicy.IgnoreShortcuts,
-                    task: zipArchive.CreateEntry);
-
-                await Console.Out.WriteLineAsync($"Created archive {zipFilename}");
+                await (zipMechanism switch
+                {
+                    DownloadMethod.UseVFS => scmHttpClient.DownloadZipUsingVFS(siteInfo, new FileInfo($"{siteInfo.SiteName}-vfs.zip").FullName),
+                    DownloadMethod.UseZIP => scmHttpClient.DownloadZipUsingZipAPI(siteInfo, new FileInfo($"{siteInfo.SiteName}-zip.zip").FullName, directory: ""),
+                    DownloadMethod.UseFunctionZIP => scmHttpClient.DownloadZipUsingFunctionZipAPI(siteInfo, new FileInfo($"{siteInfo.SiteName}-funczip.zip").FullName, includeCsproj: true, includeAppSettings: true),
+                    _ => throw new NotSupportedException(),
+                });
             }
             finally
             {
@@ -88,6 +84,34 @@
                     await armHttpClient.SetSCMSetBasicAuth(siteInfo, allow: false);
                 }
             }
+        }
+
+        static async Task DownloadZipUsingVFS(this HttpClient scmHttpClient, SiteInfo siteInfo, string zipFilename)
+        {
+            string vfsEndpoint = $"https://{siteInfo.SiteName}.scm.azurewebsites.net/api/vfs/";
+            using Stream outputStream = File.OpenWrite(zipFilename);
+            using ZipArchive zipArchive = new(outputStream, ZipArchiveMode.Create);
+            await scmHttpClient.RecurseAsync(
+                requestUri: vfsEndpoint,
+                policy: FollowPolicy.IgnoreShortcuts,
+                task: zipArchive.CreateEntry);
+        }
+
+        static async Task DownloadZipUsingZipAPI(this HttpClient scmHttpClient, SiteInfo siteInfo, string zipFilename, string directory = "")
+        {
+            var url = string.IsNullOrEmpty(directory)
+                ? $"https://{siteInfo.SiteName}.scm.azurewebsites.net/api/zip/"
+                : $"https://{siteInfo.SiteName}.scm.azurewebsites.net/api/zip/{directory.Trim('/')}/"; // Must end with /
+            using var zipStream = await scmHttpClient.GetStreamAsync(url);
+            using var fileStream = File.OpenWrite(zipFilename);
+            await zipStream.CopyToAsync(fileStream);
+        }
+
+        static async Task DownloadZipUsingFunctionZipAPI(this HttpClient scmHttpClient, SiteInfo siteInfo, string zipFilename, bool includeCsproj = false, bool includeAppSettings = false)
+        {
+            using var zipStream = await scmHttpClient.GetStreamAsync($"https://{siteInfo.SiteName}.scm.azurewebsites.net/api/functions/admin/download?includeCsproj={includeCsproj}&includeAppSettings={includeAppSettings}");
+            using var fileStream = File.OpenWrite(zipFilename);
+            await zipStream.CopyToAsync(fileStream);
         }
 
         static async Task CreateEntry(this ZipArchive zipArchive, HttpClient client, VirtualFileSystemEntry vfsEntry)
@@ -116,7 +140,7 @@
                 ? $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/{suffix}"
                 : $"/subscriptions/{info.SubscriptionID}/resourceGroups/{info.ResourceGroupName}/providers/Microsoft.Web/sites/{info.SiteName}/slots/{info.SlotName}/{suffix}";
 
-        internal static HttpClient AddAccessTokenCredential(this HttpClient httpClient, AccessToken accessToken)
+        internal static HttpClient AddBearerCredential(this HttpClient httpClient, AccessToken accessToken)
         {
             httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {accessToken.Token}");
             return httpClient;
@@ -128,14 +152,18 @@
             return httpClient;
         }
 
+        // /api/vfs Needs "Contributor"
         internal static HttpClient AddAccessTokenAsBasicAuthCredential(this HttpClient httpClient, AccessToken accessToken)
             => httpClient.AddBasicAuthCredential(username: "00000000-0000-0000-0000-000000000000", password: accessToken.Token);
 
         internal static HttpClient CreateARMHttpClient(this AccessToken accessToken)
-            => new HttpClient() { BaseAddress = new("https://management.azure.com/") }.AddAccessTokenCredential(accessToken);
+            => new HttpClient() { BaseAddress = new("https://management.azure.com/") }.AddBearerCredential(accessToken);
 
-        internal static HttpClient CreateSCMHttpClient(this AccessToken accessToken)
+        internal static HttpClient CreateSCMBasicHttpClient(this AccessToken accessToken)
             => new HttpClient().AddAccessTokenAsBasicAuthCredential(accessToken);
+
+        internal static HttpClient CreateSCMBearerHttpClient(this AccessToken accessToken)
+            => new HttpClient().AddBearerCredential(accessToken);
 
         internal static HttpClient CreateSCMHttpClient(this PublishingCredential cred)
             => new HttpClient().AddBasicAuthCredential(
